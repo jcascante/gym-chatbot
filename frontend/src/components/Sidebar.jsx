@@ -65,7 +65,7 @@ export default function Sidebar({
                 />
               </form>
             ) : (
-              <span className="conversation-title">
+              <span className="conversation-title" title={conv.title}>
                 {conv.title}
                 <span className="message-count">({conv.message_count})</span>
               </span>

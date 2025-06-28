@@ -31,6 +31,12 @@ function App() {
     }
   }, [activeConversationId]);
 
+  // Debug: Log active conversation state
+  useEffect(() => {
+    console.log('Active conversation ID:', activeConversationId);
+    console.log('Conversations count:', conversations.length);
+  }, [activeConversationId, conversations]);
+
   const fetchConversations = () => {
     fetch(`${API_BASE_URL}/conversations`, {
       headers: {
@@ -47,6 +53,9 @@ function App() {
         setConversations(data);
         if (!activeConversationId && data.length > 0) {
           setActiveConversationId(data[0].id);
+        } else if (data.length === 0) {
+          // Auto-create a conversation if none exists
+          handleCreateConversation();
         }
       })
       .catch(error => {

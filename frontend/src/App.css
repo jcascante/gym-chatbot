@@ -6,6 +6,11 @@
   height: 100vh;
   width: 100vw;
   overflow: hidden;
+  /* Desktop: center the app with background */
+  background: #000000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .logo {
@@ -55,6 +60,9 @@
   overflow: hidden;
   margin: 0;
   display: flex;
+  /* Desktop: center the app container */
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+  border-radius: 12px;
 }
 
 /* Sidebar Styles */
@@ -360,21 +368,80 @@
 .no-conversation-message {
   text-align: center;
   color: #333;
-  font-size: 1rem;
-  padding: 40px 20px;
+  font-size: 1.2rem;
+  padding: 20px;
   background-color: #f8f9fa;
   border-radius: 8px;
   margin: 20px;
   font-weight: 500;
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100px;
 }
 
-/* Mobile Responsive Design */
+/* Desktop Layout - Center the app */
+@media (min-width: 769px) {
+  #root {
+    background: #000000;
+    padding: 20px;
+    box-sizing: border-box;
+  }
+  
+  .app-container {
+    max-width: 1200px;
+    max-height: 90vh;
+    width: 90vw;
+    height: 90vh;
+    border-radius: 12px;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+    overflow: hidden;
+  }
+  
+  .sidebar {
+    border-radius: 12px 0 0 12px;
+  }
+  
+  .chat-main {
+    border-radius: 0 12px 12px 0;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+  
+  .chat-input-form {
+    display: flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    padding: 12px !important;
+    background-color: #ecf0f1 !important;
+    border-top: 1px solid #bdc3c7 !important;
+    flex-shrink: 0 !important;
+  }
+  
+  .chat-input-form input {
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+  }
+  
+  .chat-input-form button {
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+  }
+}
+
+/* Mobile Layout - Keep current full-screen design */
 @media (max-width: 768px) {
   #root {
     max-width: 100%;
     padding: 0;
     height: 100vh;
     width: 100vw;
+    background: none;
   }
 
   .app-container {
@@ -382,6 +449,8 @@
     max-height: 100vh;
     width: 100vw;
     height: 100vh;
+    border-radius: 0;
+    box-shadow: none;
   }
 
   .sidebar {
