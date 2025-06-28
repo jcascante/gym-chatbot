@@ -51,6 +51,13 @@ frontend/*.local
 *.sqlite3
 chat_history.db
 
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+terraform/outputs/
+
 # IDE
 .vscode/
 .idea/
