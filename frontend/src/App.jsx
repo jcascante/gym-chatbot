@@ -1,141 +1,163 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
+import Sidebar from './components/Sidebar';
 import './App.css';
 
 function App() {
+  const [conversations, setConversations] = useState([]);
+  const [activeConversationId, setActiveConversationId] = useState(null);
+  const [chatHistory, setChatHistory] = useState([]);
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
-  const messagesEndRef = useRef(null);
 
-  // Fetch chat history on mount
+  // Fetch conversations on mount
   useEffect(() => {
-    fetch('http://localhost:8000/history')
-      .then(res => res.json())
-      .then(data => setMessages(data.reverse()))
-      .catch(() => setMessages([]));
+    fetchConversations();
   }, []);
 
-  // Scroll to bottom on new message
+  // Fetch chat history when active conversation changes
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  const detectLanguage = (text) => {
-    // Simple Spanish detection based on common words
-    const spanishWords = ['qué', 'cómo', 'dónde', 'cuándo', 'por qué', 'quién', 'cuál', 'cuáles', 'este', 'esta', 'estos', 'estas', 'ese', 'esa', 'esos', 'esas', 'aquel', 'aquella', 'aquellos', 'aquellas', 'con', 'para', 'por', 'sin', 'sobre', 'entre', 'hacia', 'desde', 'hasta', 'durante', 'según', 'mediante', 'contra', 'bajo', 'tras', 'ante', 'bajo', 'cabe', 'so', 'través', 'versus', 'vía'];
-    const spanishChars = ['ñ', 'á', 'é', 'í', 'ó', 'ú', 'ü', '¿', '¡'];
-    
-    const textLower = text.toLowerCase();
-    const spanishWordCount = spanishWords.filter(word => textLower.includes(word)).length;
-    const spanishCharCount = spanishChars.filter(char => text.includes(char)).length;
-    
-    return (spanishWordCount > 0 || spanishCharCount > 0) ? 'es' : 'en';
-  };
-
-  const getCitationLabel = (language) => {
-    return language === 'es' ? 'Fuentes:' : 'Sources:';
-  };
-
-  const sendMessage = async (e) => {
-    e.preventDefault();
-    if (!input.trim()) return;
-    setLoading(true);
-    const userMsg = { user_message: input, bot_response: '', citations: [], timestamp: new Date().toISOString() };
-    setMessages(prev => [...prev, userMsg]);
-    try {
-      const res = await fetch('http://localhost:8000/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: input })
-      });
-      const data = await res.json();
-      setMessages(prev => {
-        const updated = [...prev];
-        updated[updated.length - 1] = {
-          ...userMsg,
-          bot_response: data.response,
-          citations: data.citations || []
-        };
-        return updated;
-      });
-    } catch {
-      setMessages(prev => {
-        const updated = [...prev];
-        updated[updated.length - 1] = {
-          ...userMsg,
-          bot_response: 'Error: Could not reach backend.',
-          citations: []
-        };
-        return updated;
-      });
+    if (activeConversationId) {
+      fetch(`http://localhost:8000/conversations/${activeConversationId}/history`)
+        .then(res => res.json())
+        .then(setChatHistory);
+    } else {
+      setChatHistory([]);
     }
+  }, [activeConversationId]);
+
+  const fetchConversations = () => {
+    fetch('http://localhost:8000/conversations')
+      .then(res => {
+        if (!res.ok) {
+          throw new Error(`HTTP error! status: ${res.status}`);
+        }
+        return res.json();
+      })
+      .then(data => {
+        console.log('Fetched conversations:', data);
+        setConversations(data);
+        if (!activeConversationId && data.length > 0) {
+          setActiveConversationId(data[0].id);
+        }
+      })
+      .catch(error => {
+        console.error('Error fetching conversations:', error);
+        setConversations([]);
+      });
+  };
+
+  const handleSelectConversation = (id) => {
+    console.log('Selecting conversation:', id);
+    setActiveConversationId(id);
+  };
+
+  const handleCreateConversation = () => {
+    console.log('Creating new conversation...');
+    fetch('http://localhost:8000/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: null })
+    })
+      .then(res => {
+        if (!res.ok) {
+          throw new Error(`HTTP error! status: ${res.status}`);
+        }
+        return res.json();
+      })
+      .then(data => {
+        console.log('Created conversation:', data);
+        fetchConversations();
+        setActiveConversationId(data.conversation_id);
+      })
+      .catch(error => {
+        console.error('Error creating conversation:', error);
+      });
+  };
+
+  const handleRenameConversation = (id, title) => {
+    fetch(`http://localhost:8000/conversations/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title })
+    }).then(() => fetchConversations());
+  };
+
+  const handleDeleteConversation = (id) => {
+    fetch(`http://localhost:8000/conversations/${id}`, { method: 'DELETE' })
+      .then(() => {
+        fetchConversations();
+        if (id === activeConversationId) {
+          setActiveConversationId(null);
+        }
+      });
+  };
+
+  const handleSend = async (e) => {
+    e.preventDefault();
+    if (!input.trim() || !activeConversationId) return;
+    setLoading(true);
+    const res = await fetch('http://localhost:8000/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: input, conversation_id: activeConversationId })
+    });
+    const data = await res.json();
     setInput('');
     setLoading(false);
-  };
-
-  const clearHistory = async () => {
-    if (!window.confirm('Are you sure you want to clear all chat history?')) {
-      return;
-    }
-    
-    try {
-      const res = await fetch('http://localhost:8000/history', {
-        method: 'DELETE'
-      });
-      
-      if (res.ok) {
-        setMessages([]);
-        alert('Chat history cleared successfully!');
-      } else {
-        alert('Failed to clear chat history.');
-      }
-    } catch (error) {
-      alert('Error clearing chat history: ' + error.message);
-    }
+    // Refresh chat history
+    fetch(`http://localhost:8000/conversations/${activeConversationId}/history`)
+      .then(res => res.json())
+      .then(setChatHistory);
+    // Optionally update conversations (for updated_at)
+    fetchConversations();
   };
 
   return (
-    <div className="chat-container">
-      <div className="chat-header">
-        <h2>Gym AI Chatbot</h2>
-        <button 
-          onClick={clearHistory} 
-          className="clear-history-btn"
-          title="Clear all chat history"
-        >
-          Clear History
-        </button>
-      </div>
-      <div className="chat-history">
-        {messages.map((msg, idx) => (
-          <div key={idx} className="chat-message">
-            <div className="user-msg"><b>You:</b> {msg.user_message}</div>
-            {msg.bot_response && (
-              <>
-                <div className="bot-msg"><b>Bot:</b> {msg.bot_response}</div>
-                {msg.citations && msg.citations.length > 0 && (
-                  <div className="citations">
-                    <small><b>{getCitationLabel(detectLanguage(msg.bot_response))}</b> {msg.citations.join(', ')}</small>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        ))}
-        <div ref={messagesEndRef} />
-      </div>
-      <form className="chat-input" onSubmit={sendMessage}>
-        <input
-          type="text"
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          placeholder="Type your message..."
-          disabled={loading}
-        />
-        <button type="submit" disabled={loading || !input.trim()}>
-          {loading ? 'Sending...' : 'Send'}
-        </button>
-      </form>
+    <div className="app-container">
+      <Sidebar
+        conversations={conversations}
+        activeConversationId={activeConversationId}
+        onSelectConversation={handleSelectConversation}
+        onCreateConversation={handleCreateConversation}
+        onRenameConversation={handleRenameConversation}
+        onDeleteConversation={handleDeleteConversation}
+      />
+      <main className="chat-main">
+        <div className="chat-history">
+          {chatHistory.map((msg, idx) => (
+            <div key={idx} className="chat-message">
+              <div className="user-message"><b>You:</b> {msg.user_message}</div>
+              <div className="bot-response"><b>Bot:</b> {msg.bot_response}</div>
+              {msg.citations && msg.citations.length > 0 && (
+                <div className="citations">
+                  <b>Citations:</b> {msg.citations.join(', ')}
+                </div>
+              )}
+              <div className="timestamp">{msg.timestamp}</div>
+            </div>
+          ))}
+        </div>
+        <form className="chat-input-form" onSubmit={handleSend}>
+          {!activeConversationId ? (
+            <div className="no-conversation-message">
+              Click "New Conversation" to start chatting
+            </div>
+          ) : (
+            <>
+              <input
+                type="text"
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                placeholder="Type your message..."
+                disabled={loading}
+              />
+              <button type="submit" disabled={loading || !input.trim()}>
+                {loading ? 'Sending...' : 'Send'}
+              </button>
+            </>
+          )}
+        </form>
+      </main>
     </div>
   );
 }
