@@ -376,13 +376,21 @@ async def generate_response_with_context_async(user_message: str, retrieved_docu
                 "temperature": TEMPERATURE
             })
         
-        async with bedrock_session as client:
-            response = await client.invoke_model(
-                modelId=BEDROCK_MODEL_ID,
-                body=body
-            )
-            response_body_bytes = await response['body'].read()
-            response_body = json.loads(response_body_bytes)
+        # Use synchronous boto3 client for model invocation to avoid coroutine issues
+        bedrock_client = boto3.client(
+            'bedrock-runtime',
+            region_name=AWS_REGION,
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+        )
+        
+        response = bedrock_client.invoke_model(
+            modelId=BEDROCK_MODEL_ID,
+            body=body
+        )
+        
+        # Read the response body
+        response_body = json.loads(response['body'].read().decode('utf-8'))
         
         # Extract response based on model type
         if BEDROCK_MODEL_ID and 'claude-3' in BEDROCK_MODEL_ID:
