@@ -6,7 +6,9 @@ export default function Sidebar({
   onSelectConversation,
   onCreateConversation,
   onRenameConversation,
-  onDeleteConversation
+  onDeleteConversation,
+  isOpen = false,
+  onClose = null
 }) {
   const [editingId, setEditingId] = useState(null);
   const [editTitle, setEditTitle] = useState('');
@@ -25,10 +27,16 @@ export default function Sidebar({
   };
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${isOpen ? 'open' : ''}`}>
       <div className="sidebar-header">
         <h2>Conversations</h2>
-        <button className="new-convo-btn" onClick={onCreateConversation} title="New Conversation">＋</button>
+        <button 
+          className="new-convo-btn" 
+          onClick={onCreateConversation} 
+          title="New Conversation"
+        >
+          ＋
+        </button>
       </div>
       <ul className="conversation-list">
         {conversations.map((conv) => (

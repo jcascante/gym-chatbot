@@ -4,6 +4,9 @@
 .env.production
 .env.*.local
 
+# Ngrok configuration (contains authtoken)
+ngrok.yml
+
 # Python
 __pycache__/
 *.py[cod]

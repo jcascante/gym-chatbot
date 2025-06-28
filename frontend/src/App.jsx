@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import Sidebar from './components/Sidebar';
+import { API_BASE_URL } from './config';
 import './App.css';
 
 function App() {
@@ -8,6 +9,7 @@ function App() {
   const [chatHistory, setChatHistory] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // Fetch conversations on mount
   useEffect(() => {
@@ -17,7 +19,11 @@ function App() {
   // Fetch chat history when active conversation changes
   useEffect(() => {
     if (activeConversationId) {
-      fetch(`http://localhost:8000/conversations/${activeConversationId}/history`)
+      fetch(`${API_BASE_URL}/conversations/${activeConversationId}/history`, {
+        headers: {
+          'ngrok-skip-browser-warning': 'true'
+        }
+      })
         .then(res => res.json())
         .then(setChatHistory);
     } else {
@@ -26,7 +32,11 @@ function App() {
   }, [activeConversationId]);
 
   const fetchConversations = () => {
-    fetch('http://localhost:8000/conversations')
+    fetch(`${API_BASE_URL}/conversations`, {
+      headers: {
+        'ngrok-skip-browser-warning': 'true'
+      }
+    })
       .then(res => {
         if (!res.ok) {
           throw new Error(`HTTP error! status: ${res.status}`);
@@ -34,7 +44,6 @@ function App() {
         return res.json();
       })
       .then(data => {
-        console.log('Fetched conversations:', data);
         setConversations(data);
         if (!activeConversationId && data.length > 0) {
           setActiveConversationId(data[0].id);
@@ -47,15 +56,18 @@ function App() {
   };
 
   const handleSelectConversation = (id) => {
-    console.log('Selecting conversation:', id);
     setActiveConversationId(id);
+    // Close sidebar on mobile after selecting conversation
+    setSidebarOpen(false);
   };
 
   const handleCreateConversation = () => {
-    console.log('Creating new conversation...');
-    fetch('http://localhost:8000/conversations', {
+    fetch(`${API_BASE_URL}/conversations`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'ngrok-skip-browser-warning': 'true'
+      },
       body: JSON.stringify({ title: null })
     })
       .then(res => {
@@ -65,9 +77,10 @@ function App() {
         return res.json();
       })
       .then(data => {
-        console.log('Created conversation:', data);
         fetchConversations();
         setActiveConversationId(data.conversation_id);
+        // Close sidebar on mobile after creating conversation
+        setSidebarOpen(false);
       })
       .catch(error => {
         console.error('Error creating conversation:', error);
@@ -75,15 +88,23 @@ function App() {
   };
 
   const handleRenameConversation = (id, title) => {
-    fetch(`http://localhost:8000/conversations/${id}`, {
+    fetch(`${API_BASE_URL}/conversations/${id}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'ngrok-skip-browser-warning': 'true'
+      },
       body: JSON.stringify({ title })
     }).then(() => fetchConversations());
   };
 
   const handleDeleteConversation = (id) => {
-    fetch(`http://localhost:8000/conversations/${id}`, { method: 'DELETE' })
+    fetch(`${API_BASE_URL}/conversations/${id}`, { 
+      method: 'DELETE',
+      headers: {
+        'ngrok-skip-browser-warning': 'true'
+      }
+    })
       .then(() => {
         fetchConversations();
         if (id === activeConversationId) {
@@ -95,21 +116,65 @@ function App() {
   const handleSend = async (e) => {
     e.preventDefault();
     if (!input.trim() || !activeConversationId) return;
+    
     setLoading(true);
-    const res = await fetch('http://localhost:8000/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: input, conversation_id: activeConversationId })
-    });
-    const data = await res.json();
-    setInput('');
-    setLoading(false);
-    // Refresh chat history
-    fetch(`http://localhost:8000/conversations/${activeConversationId}/history`)
-      .then(res => res.json())
-      .then(setChatHistory);
-    // Optionally update conversations (for updated_at)
-    fetchConversations();
+    
+    try {
+      const chatUrl = `${API_BASE_URL}/chat`;
+      
+      const res = await fetch(chatUrl, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true'
+        },
+        body: JSON.stringify({ message: input, conversation_id: activeConversationId })
+      });
+      
+      if (!res.ok) {
+        throw new Error(`HTTP error! status: ${res.status}`);
+      }
+      
+      // Try to parse JSON directly
+      const data = await res.json();
+      setInput('');
+      setLoading(false);
+      
+      // Refresh chat history immediately
+      const historyRes = await fetch(`${API_BASE_URL}/conversations/${activeConversationId}/history`, {
+        headers: {
+          'ngrok-skip-browser-warning': 'true'
+        }
+      });
+      
+      if (historyRes.ok) {
+        const historyData = await historyRes.json();
+        setChatHistory(historyData);
+      } else {
+        console.error('Failed to get history:', historyRes.status);
+      }
+      
+      // Optionally update conversations (for updated_at)
+      fetchConversations();
+    } catch (error) {
+      console.error('Error sending message:', error);
+      setLoading(false);
+    }
+  };
+
+  const toggleSidebar = () => {
+    setSidebarOpen(!sidebarOpen);
+  };
+
+  const closeSidebar = () => {
+    setSidebarOpen(false);
+  };
+
+  const handleBackdropClick = (e) => {
+    // Only close if clicking directly on the backdrop, not on its children
+    if (e.target === e.currentTarget) {
+      setSidebarOpen(false);
+    }
   };
 
   return (
@@ -121,8 +186,22 @@ function App() {
         onCreateConversation={handleCreateConversation}
         onRenameConversation={handleRenameConversation}
         onDeleteConversation={handleDeleteConversation}
+        isOpen={sidebarOpen}
+        onClose={closeSidebar}
       />
+      {sidebarOpen && (
+        <div 
+          className="sidebar-backdrop" 
+          onClick={handleBackdropClick}
+        />
+      )}
       <main className="chat-main">
+        <div className="chat-header">
+          <button className="mobile-menu-btn" onClick={toggleSidebar}>
+            ☰
+          </button>
+          <h2>Gym Chatbot</h2>
+        </div>
         <div className="chat-history">
           {chatHistory.map((msg, idx) => (
             <div key={idx} className="chat-message">

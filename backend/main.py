@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List
 import sqlite3
@@ -19,7 +20,17 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "https://gym-chatbot-frontend.loca.lt",
+        "https://gym-chatbot-test.loca.lt",
+        # Ngrok domains (wildcard for free plan)
+        "https://*.ngrok.io",
+        "https://*.ngrok-free.app",
+        # Allow all origins for development (remove in production)
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -244,23 +255,16 @@ except Exception as e:
 
 # Set up async Bedrock clients
 bedrock_session = None
-bedrock_agent_session = None
 
 async def setup_bedrock_clients():
     """Setup async Bedrock clients"""
-    global bedrock_session, bedrock_agent_session
+    global bedrock_session
     
     try:
-        # Create async session
+        # Create async session for model invocation
         session = aioboto3.Session()
         bedrock_session = session.client(
             'bedrock-runtime',
-            region_name=AWS_REGION,
-            aws_access_key_id=AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=AWS_SECRET_ACCESS_KEY
-        )
-        bedrock_agent_session = session.client(
-            'bedrock-agent-runtime',
             region_name=AWS_REGION,
             aws_access_key_id=AWS_ACCESS_KEY_ID,
             aws_secret_access_key=AWS_SECRET_ACCESS_KEY
@@ -274,11 +278,15 @@ async def retrieve_from_knowledge_base_async(query: str):
     Retrieve relevant documents from the Bedrock Knowledge Base asynchronously
     Returns tuple of (documents, source_uris)
     """
-    if bedrock_agent_session is None:
-        return None, []
-    
     try:
-        async with bedrock_agent_session as client:
+        # Create a new session for each request to avoid coroutine reuse issues
+        session = aioboto3.Session()
+        async with session.client(
+            'bedrock-agent-runtime',
+            region_name=AWS_REGION,
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+        ) as client:
             response = await client.retrieve(
                 knowledgeBaseId=KNOWLEDGE_BASE_ID,
                 retrievalQuery={
@@ -342,6 +350,15 @@ class CreateConversationResponse(BaseModel):
 
 class UpdateConversationRequest(BaseModel):
     title: str
+
+class UpdateConversationResponse(BaseModel):
+    message: str
+
+class DeleteConversationResponse(BaseModel):
+    message: str
+
+class ClearHistoryResponse(BaseModel):
+    message: str
 
 def format_source_uri(uri: str) -> str:
     """
@@ -639,17 +656,17 @@ async def get_conversation_history(conversation_id: int):
     
     return history_items
 
-@app.put('/conversations/{conversation_id}')
+@app.put('/conversations/{conversation_id}', response_model=UpdateConversationResponse)
 async def update_conversation(conversation_id: int, request: UpdateConversationRequest):
     """Update conversation title"""
     await update_conversation_title_async(conversation_id, request.title)
-    return {"message": "Conversation updated successfully"}
+    return UpdateConversationResponse(message="Conversation updated successfully")
 
-@app.delete('/conversations/{conversation_id}')
+@app.delete('/conversations/{conversation_id}', response_model=DeleteConversationResponse)
 async def delete_conversation(conversation_id: int):
     """Delete a conversation and all its messages"""
     await delete_conversation_async(conversation_id)
-    return {"message": "Conversation deleted successfully"}
+    return DeleteConversationResponse(message="Conversation deleted successfully")
 
 @app.get('/history', response_model=List[HistoryItem])
 async def get_history():
@@ -667,14 +684,14 @@ async def get_history():
     
     return history_items
 
-@app.delete('/history')
+@app.delete('/history', response_model=ClearHistoryResponse)
 async def clear_history():
     """Clear all chat history from the database"""
     try:
         async with aiosqlite.connect(DB_PATH) as conn:
             await conn.execute('DELETE FROM chat_history')
             await conn.commit()
-        return {"message": "Chat history cleared successfully"}
+        return ClearHistoryResponse(message="Chat history cleared successfully")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error clearing history: {str(e)}")
 
@@ -683,4 +700,9 @@ async def clear_database_async():
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute('DELETE FROM chat_history')
         await conn.commit()
-    logger.info("Database cleared successfully") 
+    logger.info("Database cleared successfully")
+
+@app.get('/health')
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "timestamp": datetime.datetime.now().isoformat()} 
