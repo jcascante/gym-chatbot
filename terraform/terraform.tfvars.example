@@ -1,0 +1,19 @@
+# Copy this file to terraform.tfvars and modify the values as needed
+
+aws_region = "us-east-1"
+environment = "dev"
+
+# S3 bucket name (must be globally unique)
+s3_bucket_name = "your-unique-gym-chatbot-documents-bucket"
+
+# Bedrock model configuration
+bedrock_model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
+knowledge_base_name = "gym-chatbot-knowledge-base"
+
+# Tags for all resources
+tags = {
+  Project     = "gym-chatbot"
+  Environment = "dev"
+  ManagedBy   = "terraform"
+  Owner       = "your-name"
+} 

@@ -381,7 +381,8 @@ async def generate_response_with_context_async(user_message: str, retrieved_docu
                 modelId=BEDROCK_MODEL_ID,
                 body=body
             )
-            response_body = json.loads(response['body'].read())
+            response_body_bytes = await response['body'].read()
+            response_body = json.loads(response_body_bytes)
         
         # Extract response based on model type
         if BEDROCK_MODEL_ID and 'claude-3' in BEDROCK_MODEL_ID:

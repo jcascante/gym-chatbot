@@ -122,6 +122,60 @@ TEMPERATURE=0.7
    - Copy the Knowledge Base ID from the console
    - Add it to your `.env` file
 
+## Infrastructure as Code (Terraform)
+
+For production deployments, we provide Terraform modules to automate AWS infrastructure setup.
+
+### Quick Infrastructure Deployment
+
+```bash
+# Navigate to terraform directory
+cd terraform
+
+# Copy and configure variables
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars with your values
+
+# Deploy infrastructure
+./deploy.sh
+
+# After deployment, ingest documents
+python scripts/ingest_documents.py
+```
+
+### What Gets Deployed
+
+- **S3 Bucket**: Secure document storage with encryption
+- **Bedrock Knowledge Base**: Vector-based knowledge retrieval
+- **IAM Roles & Policies**: Secure access with least privilege
+- **Bedrock Models**: AI inference capabilities
+
+### Infrastructure Features
+
+- 🔒 **Security**: Encryption at rest and in transit
+- 🏷️ **Tagging**: Cost tracking and resource management
+- 🔄 **Versioning**: S3 bucket versioning for data safety
+- 🚫 **Access Control**: Public access blocked by default
+- 📊 **Monitoring**: CloudWatch integration ready
+
+### Manual Infrastructure Setup
+
+If you prefer to set up AWS resources manually:
+
+1. **Create Knowledge Base**:
+   - Go to AWS Bedrock Console
+   - Navigate to "Knowledge bases"
+   - Create a new knowledge base
+   - Upload your fitness/gym documents
+
+2. **Request Model Access**:
+   - Go to "Model access" in Bedrock Console
+   - Request access to Claude models
+
+3. **Get Knowledge Base ID**:
+   - Copy the Knowledge Base ID from the console
+   - Add it to your `.env` file
+
 ## API Endpoints
 
 ### POST /chat
