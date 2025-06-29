@@ -508,8 +508,25 @@ async def generate_response_with_context_async(user_message: str, retrieved_docu
             else:
                 context = "Please answer the following question. If you don't have specific information about this topic, please say so:\n\n"
         
-        # Create the full prompt
-        full_prompt = f"{context}{user_message}"
+        # Build conversation history context
+        conversation_context = ""
+        if chat_history:
+            if user_language == 'es':
+                conversation_context = "Historial de la conversación:\n"
+            else:
+                conversation_context = "Conversation history:\n"
+            
+            # Include last 10 messages for context (to avoid token limits)
+            recent_history = chat_history[-10:] if len(chat_history) > 10 else chat_history
+            
+            for msg in recent_history:
+                conversation_context += f"Usuario: {msg['user_message']}\n"
+                conversation_context += f"Asistente: {msg['bot_response']}\n\n"
+            
+            conversation_context += "---\n\n"
+        
+        # Create the full prompt with conversation history
+        full_prompt = f"{context}{conversation_context}{user_message}"
         
         # Handle different model types and API versions
         if BEDROCK_MODEL_ID and 'claude-3' in BEDROCK_MODEL_ID:
@@ -606,7 +623,7 @@ async def chat_endpoint(chat_request: ChatRequest):
         conversation_id = await create_conversation_async()
     
     # Get recent conversation history for language context
-    chat_history = await get_chat_history_async(conversation_id, 5)
+    chat_history = await get_chat_history_async(conversation_id, 10)
     
     # Step 1: Retrieve relevant documents from knowledge base
     retrieved_documents, source_uris = await retrieve_from_knowledge_base_async(user_message)
