@@ -33,60 +33,199 @@ logger = logging.getLogger(__name__)
 async def init_db_async():
     """Initialize database asynchronously"""
     async with aiosqlite.connect(DB_PATH) as conn:
+        # Create conversations table
+        await conn.execute('''CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )''')
+        
+        # Create chat_history table with conversation_id
         await conn.execute('''CREATE TABLE IF NOT EXISTS chat_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
             user_message TEXT NOT NULL,
             bot_response TEXT NOT NULL,
             citations TEXT,
-            timestamp TEXT NOT NULL
+            timestamp TEXT NOT NULL,
+            FOREIGN KEY (conversation_id) REFERENCES conversations (id)
         )''')
+        
         await conn.commit()
 
 async def migrate_database_async():
-    """Add citations column to existing chat_history table if it doesn't exist"""
+    """Migrate database schema for conversation support"""
     try:
         async with aiosqlite.connect(DB_PATH) as conn:
-            # Check if citations column exists
-            cursor = await conn.execute("PRAGMA table_info(chat_history)")
-            columns = [column[1] async for column in cursor]
+            # Check if conversations table exists
+            cursor = await conn.execute("PRAGMA table_info(conversations)")
+            conversations_columns = [column[1] async for column in cursor]
             
-            if 'citations' not in columns:
-                logger.info("Adding citations column to chat_history table...")
-                await conn.execute("ALTER TABLE chat_history ADD COLUMN citations TEXT")
+            if not conversations_columns:
+                logger.info("Creating conversations table...")
+                await conn.execute('''CREATE TABLE conversations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )''')
+                
+                # Create default conversation for existing data
+                now = datetime.datetime.now().isoformat()
+                await conn.execute(
+                    'INSERT INTO conversations (title, created_at, updated_at) VALUES (?, ?, ?)',
+                    ('Default Conversation', now, now)
+                )
+                default_conversation_id = await conn.execute('SELECT last_insert_rowid()')
+                default_conversation_id = (await default_conversation_id.fetchone())[0]
+                
+                # Check if chat_history table has conversation_id column
+                cursor = await conn.execute("PRAGMA table_info(chat_history)")
+                chat_columns = [column[1] async for column in cursor]
+                
+                if 'conversation_id' not in chat_columns:
+                    logger.info("Adding conversation_id column to chat_history table...")
+                    # Create new table with conversation_id
+                    await conn.execute('''CREATE TABLE chat_history_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        conversation_id INTEGER NOT NULL,
+                        user_message TEXT NOT NULL,
+                        bot_response TEXT NOT NULL,
+                        citations TEXT,
+                        timestamp TEXT NOT NULL,
+                        FOREIGN KEY (conversation_id) REFERENCES conversations (id)
+                    )''')
+                    
+                    # Migrate existing data to new table
+                    await conn.execute('''
+                        INSERT INTO chat_history_new (conversation_id, user_message, bot_response, citations, timestamp)
+                        SELECT ?, user_message, bot_response, citations, timestamp FROM chat_history
+                    ''', (default_conversation_id,))
+                    
+                    # Drop old table and rename new one
+                    await conn.execute('DROP TABLE chat_history')
+                    await conn.execute('ALTER TABLE chat_history_new RENAME TO chat_history')
+                
                 await conn.commit()
                 logger.info("Migration completed successfully!")
             
     except Exception as e:
         logger.error(f"Error during migration: {e}")
 
-async def get_chat_history_async(limit: int = 5):
-    """Get recent chat history asynchronously"""
+async def get_chat_history_async(conversation_id: int | None = None, limit: int = 50):
+    """Get chat history for a specific conversation asynchronously"""
     async with aiosqlite.connect(DB_PATH) as conn:
-        cursor = await conn.execute(
-            'SELECT user_message, bot_response, citations, timestamp FROM chat_history ORDER BY id DESC LIMIT ?',
-            (limit,)
-        )
+        if conversation_id:
+            cursor = await conn.execute(
+                'SELECT user_message, bot_response, citations, timestamp FROM chat_history WHERE conversation_id = ? ORDER BY id ASC LIMIT ?',
+                (conversation_id, limit)
+            )
+        else:
+            # Get from most recent conversation
+            cursor = await conn.execute('''
+                SELECT ch.user_message, ch.bot_response, ch.citations, ch.timestamp 
+                FROM chat_history ch
+                JOIN conversations c ON ch.conversation_id = c.id
+                ORDER BY c.updated_at DESC, ch.id ASC
+                LIMIT ?
+            ''', (limit,))
+        
         rows = await cursor.fetchall()
         
         chat_history = []
         for row in rows:
+            citations = []
+            if row[2]:  # citations column
+                try:
+                    citations = json.loads(row[2])
+                except json.JSONDecodeError:
+                    citations = []
+            
             chat_history.append({
                 'user_message': row[0],
                 'bot_response': row[1],
-                'citations': row[2],
+                'citations': citations,
                 'timestamp': row[3]
             })
-        chat_history.reverse()  # Put in chronological order
         return chat_history
 
-async def save_chat_async(user_message: str, bot_response: str, citations: List[str]):
-    """Save chat message asynchronously"""
+async def save_chat_async(conversation_id: int, user_message: str, bot_response: str, citations: List[str]):
+    """Save chat message asynchronously with conversation ID"""
+    timestamp = datetime.datetime.now().isoformat()
+    async with aiosqlite.connect(DB_PATH) as conn:
+        # Save the chat message
+        await conn.execute(
+            'INSERT INTO chat_history (conversation_id, user_message, bot_response, citations, timestamp) VALUES (?, ?, ?, ?, ?)',
+            (conversation_id, user_message, bot_response, json.dumps(citations), timestamp)
+        )
+        
+        # Update conversation's updated_at timestamp
+        await conn.execute(
+            'UPDATE conversations SET updated_at = ? WHERE id = ?',
+            (timestamp, conversation_id)
+        )
+        
+        await conn.commit()
+
+async def create_conversation_async(title: str | None = None) -> int:
+    """Create a new conversation and return its ID"""
+    if not title:
+        title = f"Conversation {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    
     timestamp = datetime.datetime.now().isoformat()
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(
-            'INSERT INTO chat_history (user_message, bot_response, citations, timestamp) VALUES (?, ?, ?, ?)',
-            (user_message, bot_response, json.dumps(citations), timestamp)
+            'INSERT INTO conversations (title, created_at, updated_at) VALUES (?, ?, ?)',
+            (title, timestamp, timestamp)
         )
+        await conn.commit()
+        
+        # Get the ID of the newly created conversation
+        cursor = await conn.execute('SELECT last_insert_rowid()')
+        conversation_id = (await cursor.fetchone())[0]
+        return conversation_id
+
+async def get_conversations_async() -> List[dict]:
+    """Get list of all conversations with their metadata"""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cursor = await conn.execute('''
+            SELECT c.id, c.title, c.created_at, c.updated_at,
+                   COUNT(ch.id) as message_count
+            FROM conversations c
+            LEFT JOIN chat_history ch ON c.id = ch.conversation_id
+            GROUP BY c.id
+            ORDER BY c.updated_at DESC
+        ''')
+        
+        rows = await cursor.fetchall()
+        conversations = []
+        for row in rows:
+            conversations.append({
+                'id': row[0],
+                'title': row[1],
+                'created_at': row[2],
+                'updated_at': row[3],
+                'message_count': row[4]
+            })
+        return conversations
+
+async def update_conversation_title_async(conversation_id: int, title: str):
+    """Update the title of a conversation"""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            'UPDATE conversations SET title = ? WHERE id = ?',
+            (title, conversation_id)
+        )
+        await conn.commit()
+
+async def delete_conversation_async(conversation_id: int):
+    """Delete a conversation and all its messages"""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        # Delete all messages in the conversation
+        await conn.execute('DELETE FROM chat_history WHERE conversation_id = ?', (conversation_id,))
+        # Delete the conversation
+        await conn.execute('DELETE FROM conversations WHERE id = ?', (conversation_id,))
         await conn.commit()
 
 # Initialize database on startup
@@ -174,16 +313,35 @@ async def retrieve_from_knowledge_base_async(query: str):
 
 class ChatRequest(BaseModel):
     message: str
+    conversation_id: int | None = None
 
 class ChatResponse(BaseModel):
     response: str
     citations: List[str] = []
+    conversation_id: int
 
 class HistoryItem(BaseModel):
     user_message: str
     bot_response: str
     citations: List[str] = []
     timestamp: str
+
+class ConversationItem(BaseModel):
+    id: int
+    title: str
+    created_at: str
+    updated_at: str
+    message_count: int
+
+class CreateConversationRequest(BaseModel):
+    title: str | None = None
+
+class CreateConversationResponse(BaseModel):
+    conversation_id: int
+    title: str
+
+class UpdateConversationRequest(BaseModel):
+    title: str
 
 def format_source_uri(uri: str) -> str:
     """
@@ -424,9 +582,14 @@ async def generate_response_with_context_async(user_message: str, retrieved_docu
 @app.post('/chat', response_model=ChatResponse)
 async def chat_endpoint(chat_request: ChatRequest):
     user_message = chat_request.message
+    conversation_id = chat_request.conversation_id
+    
+    # If no conversation_id provided, create a new conversation
+    if not conversation_id:
+        conversation_id = await create_conversation_async()
     
     # Get recent conversation history for language context
-    chat_history = await get_chat_history_async(5)
+    chat_history = await get_chat_history_async(conversation_id, 5)
     
     # Step 1: Retrieve relevant documents from knowledge base
     retrieved_documents, source_uris = await retrieve_from_knowledge_base_async(user_message)
@@ -435,30 +598,71 @@ async def chat_endpoint(chat_request: ChatRequest):
     bot_response, citations = await generate_response_with_context_async(user_message, retrieved_documents, source_uris, chat_history)
     
     # Step 3: Store in database
-    await save_chat_async(user_message, bot_response, citations)
+    await save_chat_async(conversation_id, user_message, bot_response, citations)
     
-    return {"response": bot_response, "citations": citations}
+    return {"response": bot_response, "citations": citations, "conversation_id": conversation_id}
+
+@app.get('/conversations', response_model=List[ConversationItem])
+async def get_conversations():
+    """Get list of all conversations"""
+    conversations = await get_conversations_async()
+    return conversations
+
+@app.post('/conversations', response_model=CreateConversationResponse)
+async def create_conversation(request: CreateConversationRequest):
+    """Create a new conversation"""
+    conversation_id = await create_conversation_async(request.title)
+    conversations = await get_conversations_async()
+    new_conversation = next((c for c in conversations if c['id'] == conversation_id), None)
+    
+    if new_conversation:
+        return CreateConversationResponse(
+            conversation_id=conversation_id,
+            title=new_conversation['title']
+        )
+    else:
+        raise HTTPException(status_code=500, detail="Failed to create conversation")
+
+@app.get('/conversations/{conversation_id}/history', response_model=List[HistoryItem])
+async def get_conversation_history(conversation_id: int):
+    """Get chat history for a specific conversation"""
+    chat_history = await get_chat_history_async(conversation_id, 50)
+    
+    history_items = []
+    for item in chat_history:
+        history_items.append(HistoryItem(
+            user_message=item['user_message'],
+            bot_response=item['bot_response'],
+            citations=item['citations'],
+            timestamp=item['timestamp']
+        ))
+    
+    return history_items
+
+@app.put('/conversations/{conversation_id}')
+async def update_conversation(conversation_id: int, request: UpdateConversationRequest):
+    """Update conversation title"""
+    await update_conversation_title_async(conversation_id, request.title)
+    return {"message": "Conversation updated successfully"}
+
+@app.delete('/conversations/{conversation_id}')
+async def delete_conversation(conversation_id: int):
+    """Delete a conversation and all its messages"""
+    await delete_conversation_async(conversation_id)
+    return {"message": "Conversation deleted successfully"}
 
 @app.get('/history', response_model=List[HistoryItem])
 async def get_history():
-    async with aiosqlite.connect(DB_PATH) as conn:
-        cursor = await conn.execute('SELECT user_message, bot_response, citations, timestamp FROM chat_history ORDER BY id DESC LIMIT 50')
-        rows = await cursor.fetchall()
+    """Get history from the most recent conversation (for backward compatibility)"""
+    chat_history = await get_chat_history_async(limit=50)
     
     history_items = []
-    for row in rows:
-        citations = []
-        if row[2]:  # citations column
-            try:
-                citations = json.loads(row[2])
-            except json.JSONDecodeError:
-                citations = []
-        
+    for item in chat_history:
         history_items.append(HistoryItem(
-            user_message=row[0], 
-            bot_response=row[1], 
-            citations=citations,
-            timestamp=row[3]
+            user_message=item['user_message'],
+            bot_response=item['bot_response'],
+            citations=item['citations'],
+            timestamp=item['timestamp']
         ))
     
     return history_items
