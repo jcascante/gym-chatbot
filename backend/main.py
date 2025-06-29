@@ -37,7 +37,7 @@ app.add_middleware(
 )
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
 # Async database operations
@@ -302,8 +302,11 @@ async def retrieve_from_knowledge_base_async(query: str):
             # Extract retrieved passages and source URIs
             retrieved_passages = []
             source_uris = []
+            seen_uris = set()  # Track seen URIs to avoid duplicates
             
-            for result in response.get('retrievalResults', []):
+            logger.debug(f"Retrieved {len(response.get('retrievalResults', []))} results from knowledge base")
+            
+            for i, result in enumerate(response.get('retrievalResults', [])):
                 content = result.get('content', {})
                 text = content.get('text', '')
                 if text:
@@ -311,9 +314,17 @@ async def retrieve_from_knowledge_base_async(query: str):
                     
                     # Extract source URI if available
                     source_uri = result.get('location', {}).get('s3Location', {}).get('uri', '')
-                    if source_uri and source_uri not in source_uris:
-                        source_uris.append(source_uri)
+                    if source_uri:
+                        if source_uri not in seen_uris:
+                            source_uris.append(source_uri)
+                            seen_uris.add(source_uri)
+                            logger.debug(f"Added source URI {i+1}: {source_uri}")
+                        else:
+                            logger.debug(f"Skipped duplicate URI {i+1}: {source_uri}")
+                    else:
+                        logger.debug(f"No source URI found for result {i+1}")
             
+            logger.debug(f"Final unique source URIs: {source_uris}")
             return retrieved_passages, source_uris
     except Exception as e:
         logger.error(f"Error retrieving from knowledge base: {e}")
@@ -407,21 +418,36 @@ def detect_language(text: str) -> str:
     """
     text_lower = text.lower()
     
-    # Spanish indicators
-    spanish_words = ['qué', 'cómo', 'dónde', 'cuándo', 'por qué', 'quién', 'cuál', 'cuáles', 'este', 'esta', 'estos', 'estas', 'ese', 'esa', 'esos', 'esas', 'aquel', 'aquella', 'aquellos', 'aquellas', 'con', 'para', 'por', 'sin', 'sobre', 'entre', 'hacia', 'desde', 'hasta', 'durante', 'según', 'mediante', 'contra', 'bajo', 'tras', 'ante', 'bajo', 'cabe', 'so', 'través', 'versus', 'vía']
+    # Spanish indicators (more specific words)
+    spanish_words = ['qué', 'cómo', 'dónde', 'cuándo', 'por qué', 'quién', 'cuál', 'cuáles', 'este', 'esta', 'estos', 'estas', 'ese', 'esa', 'esos', 'esas', 'aquel', 'aquella', 'aquellos', 'aquellas', 'con', 'para', 'por', 'sin', 'sobre', 'entre', 'hacia', 'desde', 'hasta', 'durante', 'según', 'mediante', 'contra', 'bajo', 'tras', 'ante', 'bajo', 'cabe', 'so', 'través', 'versus', 'vía', 'ejercicio', 'rutina', 'series', 'repeticiones', 'peso', 'fuerza', 'musculo', 'gimnasio', 'necesito', 'quiero', 'debo', 'puedo', 'debería']
     spanish_chars = ['ñ', 'á', 'é', 'í', 'ó', 'ú', 'ü', '¿', '¡']
     
-    # Check for Spanish words
-    spanish_word_count = sum(1 for word in spanish_words if word in text_lower)
+    # English indicators (more specific words)
+    english_words = ['what', 'how', 'where', 'when', 'why', 'who', 'which', 'this', 'that', 'these', 'those', 'with', 'for', 'by', 'without', 'over', 'between', 'toward', 'from', 'until', 'during', 'according', 'through', 'against', 'under', 'exercise', 'training', 'routine', 'sets', 'repetitions', 'weight', 'strength', 'muscle', 'gym', 'need', 'want', 'should', 'can', 'could']
     
-    # Check for Spanish characters
+    # Check for Spanish words and characters
+    spanish_word_count = sum(1 for word in spanish_words if word in text_lower)
     spanish_char_count = sum(1 for char in spanish_chars if char in text_lower)
     
-    # If we find Spanish indicators, return Spanish
-    if spanish_word_count > 0 or spanish_char_count > 0:
+    # Check for English words
+    english_word_count = sum(1 for word in english_words if word in text_lower)
+    
+    # Calculate scores
+    spanish_score = spanish_word_count + (spanish_char_count * 2)  # Give more weight to special characters
+    english_score = english_word_count
+    
+    logger.debug(f"Language detection for '{text}': Spanish score={spanish_score}, English score={english_score}")
+    
+    # If we find clear Spanish indicators, return Spanish
+    if spanish_score > 0:
         return 'es'
     
-    return 'en'  # Default to English
+    # If we find clear English indicators, return English
+    if english_score > 0:
+        return 'en'
+    
+    # Default to English for unclear cases
+    return 'en'
 
 def get_conversation_language(user_message: str, chat_history: List[dict]) -> str:
     """
@@ -429,12 +455,17 @@ def get_conversation_language(user_message: str, chat_history: List[dict]) -> st
     """
     # First, check if the current message has clear language indicators
     current_language = detect_language(user_message)
+    logger.debug(f"Current message language detected: {current_language}")
     
-    # If current message is clearly Spanish, use Spanish
+    # Prioritize the current message language - if it's clearly Spanish or English, use that
     if current_language == 'es':
+        logger.debug("Using Spanish based on current message")
         return 'es'
+    elif current_language == 'en':
+        logger.debug("Using English based on current message")
+        return 'en'
     
-    # If current message is English, check recent conversation history
+    # If current message language is unclear, check recent conversation history
     # Look at the last few messages to see if we've been speaking Spanish
     recent_messages = chat_history[-3:] if len(chat_history) >= 3 else chat_history
     
@@ -449,21 +480,92 @@ def get_conversation_language(user_message: str, chat_history: List[dict]) -> st
             else:
                 english_count += 1
     
+    logger.debug(f"History analysis: Spanish={spanish_count}, English={english_count}")
+    
     # If we've been speaking Spanish recently, continue in Spanish
     if spanish_count > english_count:
+        logger.debug("Using Spanish based on conversation history")
         return 'es'
     
     # Default to English
+    logger.debug("Using English as default")
     return 'en'
 
 def get_language_instruction(language: str) -> str:
     """
     Get language-specific instruction for the model
     """
+    # Document structure instructions
     if language == 'es':
-        return "Por favor responde en español usando la información proporcionada arriba. Cuando hagas referencia a información de documentos específicos, cítalos por su URI de origen:"
+        document_structure = """
+IMPORTANTE - ESTRUCTURA DE DOCUMENTOS DE PROGRAMACIÓN:
+Los documentos de programaciones están estructurados de la siguiente manera:
+- El nombre del documento es el nombre de la programación.
+- El contenido del documento es el contenido de la programación.
+- La estructura del documento es la siguiente:
+    - La primera parte es el nombre de la programación seguido de una descripción de la programación y una guía básica de cómo usarla.
+    - La segunda parte es una guía de calentamiento y estiramiento.
+    - La tercera parte del documento es la programación en sí, con los ejercicios y las series y repeticiones. Está estructurado en tablas donde cada tabla es una semana y cada columna es un día, en el cual se detallan los ejercicios.
+    - La cuarta parte es una "Guía de Programa", la cual explica el código de colores que se usa en la programación.
+    - La quinta parte es una "Guía de Volumen". Específica por cada semana y por color el volumen de cada ejercicio. Repeticiones y sets.
+    - Existe un codigo de colores que enlaza las diferentes tablas.
+
+"""
+        return f"{document_structure}Eres un experto en entrenamiento de fuerza y acondicionamiento físico con amplio conocimiento en programación de ejercicios, periodización, biomecánica y fisiología del ejercicio. IMPORTANTE: Usa ÚNICAMENTE la información proporcionada en los documentos de la base de conocimientos para responder. NO uses ningún conocimiento externo o general. Responde en español usando la información proporcionada arriba. Cuando hagas referencia a información de documentos específicos, cítalos por su número de origen [1], [2], etc. Proporciona consejos técnicos precisos y mantén el formato original con párrafos separados y estructura clara:"
     else:
-        return "Please answer the following question using the information provided above. When referencing information from specific documents, cite them by their source URI:"
+        document_structure = """
+IMPORTANT - PROGRAMMING DOCUMENT STRUCTURE:
+The programming documents are structured as follows:
+- The document name is the name of the programming.
+- The document content is the content of the programming.
+- The document structure is as follows:
+    - The first part is the name of the programming followed by a description of the programming and a basic guide on how to use it.
+    - The second part is a warm-up and stretching guide.
+    - The third part of the document is the programming itself, with the exercises and sets and repetitions. It is structured in tables where each table is a week and each column is a day, in which the exercises are detailed.
+    - The fourth part is a "Program Guide", which explains the color code used in the programming.
+    - The fifth part is a "Volume Guide". It specifies for each week and by color the volume of each exercise. Repetitions and sets.
+    - There is a color code that links the different tables.
+
+"""
+        return f"{document_structure}You are an expert in strength and conditioning training with extensive knowledge in exercise programming, periodization, biomechanics, and exercise physiology. IMPORTANT: Use ONLY the information provided in the knowledge base documents to answer. DO NOT use any external or general knowledge. Please answer the following question using the information provided above. When referencing information from specific documents, cite them by their source number [1], [2], etc. Provide precise technical advice and maintain the original formatting with separate paragraphs and clear structure:"
+
+def format_response_text(response: str) -> str:
+    """
+    Post-process the response to ensure proper formatting
+    """
+    if not response:
+        return response
+    
+    # Split into lines and clean up
+    lines = response.split('\n')
+    formatted_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        if line:
+            # Check if line looks like a list item or exercise
+            if (line.startswith(('•', '-', '*', '1)', '2)', '3)', '4)', '5)', '6)', '7)', '8)', '9)', '0)')) or
+                line.startswith(('A)', 'B)', 'C)', 'D)', 'E)', 'F)', 'G)', 'H)')) or
+                line.startswith(('WEEK', 'DAY', 'CONDITIONING', 'GUÍA', 'INTENSITY', 'REST')) or
+                line.startswith(('Sets:', 'Reps:', 'Time:', 'Target:'))):
+                formatted_lines.append(line)
+            elif line.startswith(('*', '_')) and line.endswith(('*', '_')):
+                # Preserve italic text
+                formatted_lines.append(line)
+            elif len(line) > 100 and not line.startswith('|'):
+                # Long lines that aren't tables - try to break into sentences
+                sentences = line.split('. ')
+                for i, sentence in enumerate(sentences):
+                    if sentence.strip():
+                        if i == 0:
+                            formatted_lines.append(sentence.strip())
+                        else:
+                            formatted_lines.append(sentence.strip())
+            else:
+                formatted_lines.append(line)
+    
+    # Join with proper spacing
+    return '\n\n'.join(formatted_lines)
 
 async def generate_response_with_context_async(user_message: str, retrieved_documents: List[str] | None, source_uris: List[str], chat_history: List[dict]):
     """
@@ -487,21 +589,56 @@ async def generate_response_with_context_async(user_message: str, retrieved_docu
                 context = "Basándote en la siguiente información:\n\n"
             else:
                 context = "Based on the following information:\n\n"
-                
-            for i, doc in enumerate(retrieved_documents, 1):
-                context += f"Document {i}:\n{doc}\n\n"
             
-            # Add source URIs to context for reference
+            # First, create the unique citations mapping to ensure consistent numbering
+            unique_citations = {}
+            for uri in source_uris:
+                formatted_name = format_source_uri(uri)
+                if formatted_name not in unique_citations:
+                    unique_citations[formatted_name] = uri
+            
+            # Create a mapping from URI to citation number for consistent referencing
+            uri_to_citation_number = {}
+            for i, (formatted_name, uri) in enumerate(unique_citations.items(), 1):
+                uri_to_citation_number[uri] = i
+            
+            # Group documents by source URI to assign consistent document numbers
+            doc_groups = {}
+            for i, doc in enumerate(retrieved_documents):
+                if i < len(source_uris):
+                    uri = source_uris[i]
+                    if uri not in doc_groups:
+                        doc_groups[uri] = []
+                    doc_groups[uri].append(doc)
+            
+            # Build context with grouped documents using the same numbering as citations
+            for uri, docs in doc_groups.items():
+                citation_number = uri_to_citation_number.get(uri, 1)
+                context += f"[{citation_number}]:\n"
+                for doc in docs:
+                    context += f"{doc}\n\n"
+            
+            # Add source URIs to context for reference with matching numbers
             if source_uris:
                 if user_language == 'es':
                     context += "Documentos fuente:\n"
                 else:
                     context += "Source documents:\n"
-                for i, uri in enumerate(source_uris, 1):
-                    context += f"Document {i}: {format_source_uri(uri)}\n"
+                
+                for uri in unique_citations.values():
+                    citation_number = uri_to_citation_number.get(uri, 1)
+                    formatted_name = format_source_uri(uri)
+                    context += f"[{citation_number}]: {formatted_name}\n"
                 context += "\n"
             
+            # Add language instruction first (more prominent)
             context += f"{language_instruction}\n\n"
+            
+            # Add formatting instructions
+            if user_language == 'es':
+                context += "IMPORTANTE: Al responder como experto en entrenamiento de fuerza y acondicionamiento, mantén el formato original del texto. Usa párrafos separados, listas con viñetas para ejercicios y series, y preserva la estructura de tablas de entrenamiento, rutinas y progresiones. Organiza la información de manera clara: ejercicios, series, repeticiones, descansos, intensidad y progresión. No combines todo en un solo párrafo.\n\n"
+            else:
+                context += "IMPORTANT: When responding as a strength and conditioning expert, maintain the original text formatting. Use separate paragraphs, bullet points for exercises and sets, and preserve the structure of training tables, routines, and progressions. Organize information clearly: exercises, sets, repetitions, rest periods, intensity, and progression. Do not combine everything into a single paragraph.\n\n"
         else:
             if user_language == 'es':
                 context = "Por favor responde la siguiente pregunta. Si no tienes información específica sobre este tema, por favor indícalo:\n\n"
@@ -528,9 +665,19 @@ async def generate_response_with_context_async(user_message: str, retrieved_docu
         # Create the full prompt with conversation history
         full_prompt = f"{context}{conversation_context}{user_message}"
         
+        # Add explicit language instruction at the end
+        if user_language == 'es':
+            full_prompt += "\n\nIMPORTANTE: Responde ÚNICAMENTE en español. NO uses inglés en tu respuesta."
+        else:
+            full_prompt += "\n\nIMPORTANT: Respond ONLY in English. DO NOT use Spanish in your response."
+        
+        logger.debug(f"User language detected: {user_language}")
+        logger.debug(f"Full prompt: {full_prompt}")
+        
         # Handle different model types and API versions
         if BEDROCK_MODEL_ID and 'claude-3' in BEDROCK_MODEL_ID:
             # Claude 3 models use Messages API
+            # Note: Claude 3 Haiku doesn't support system messages, so we include language instruction in user message
             body = json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": MAX_TOKENS_TO_SAMPLE,
@@ -601,12 +748,37 @@ async def generate_response_with_context_async(user_message: str, retrieved_docu
             else:
                 bot_response = 'Sorry, I could not generate a response.'
         
-        # Return unique source URIs as citations
-        citations = list(set(source_uris))  # Remove duplicates
-        # Format citations for display
-        formatted_citations = [format_source_uri(uri) for uri in citations]
+        # Post-process the response
+        formatted_response = format_response_text(bot_response)
         
-        return bot_response, formatted_citations
+        # Return unique source URIs as citations with index-to-file mapping
+        # Use the same unique_citations mapping that was created earlier for consistency
+        if 'unique_citations' in locals():
+            # Format citations for display with index-to-file mapping
+            formatted_citations = []
+            for i, (formatted_name, uri) in enumerate(unique_citations.items(), 1):
+                formatted_citations.append(f"[{i}] - {formatted_name}")
+        else:
+            # Fallback to the original logic if unique_citations wasn't created
+            unique_citations = {}
+            logger.debug(f"Original source_uris: {source_uris}")
+            
+            for uri in source_uris:
+                formatted_name = format_source_uri(uri)
+                if formatted_name not in unique_citations:
+                    unique_citations[formatted_name] = uri
+                    logger.debug(f"Added citation: {formatted_name} -> {uri}")
+                else:
+                    logger.debug(f"Skipped duplicate: {formatted_name} (already exists)")
+            
+            # Format citations for display with index-to-file mapping
+            formatted_citations = []
+            for i, (formatted_name, uri) in enumerate(unique_citations.items(), 1):
+                formatted_citations.append(f"[{i}] - {formatted_name}")
+        
+        logger.debug(f"Final formatted citations: {formatted_citations}")
+        
+        return formatted_response, formatted_citations
     except Exception as e:
         if user_language == 'es':
             return f"[Error: No se pudo generar respuesta desde Bedrock: {e}]", []

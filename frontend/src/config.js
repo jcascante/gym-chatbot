@@ -6,11 +6,11 @@ const config = {
   },
   // Localtunnel URLs
   localtunnel: {
-    backendUrl: 'https://078e-186-5-174-68.ngrok-free.app'
+    backendUrl: 'https://ddb7-186-15-77-109.ngrok-free.app'
   },
   // Ngrok URLs
   ngrok: {
-    backendUrl: 'https://078e-186-5-174-68.ngrok-free.app'
+    backendUrl: 'https://ddb7-186-15-77-109.ngrok-free.app'
   }
 };
 

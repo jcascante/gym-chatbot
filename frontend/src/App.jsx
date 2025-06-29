@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import Sidebar from './components/Sidebar';
+import MarkdownRenderer from './components/MarkdownRenderer';
 import { API_BASE_URL } from './config';
 import './App.css';
 
@@ -10,6 +11,7 @@ function App() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const chatHistoryRef = useRef(null);
 
   // Fetch conversations on mount
   useEffect(() => {
@@ -31,11 +33,45 @@ function App() {
     }
   }, [activeConversationId]);
 
+  // Auto-scroll to show new messages when chat history changes
+  useEffect(() => {
+    if (chatHistoryRef.current && chatHistory.length > 0) {
+      // Get the last message element
+      const lastMessage = chatHistoryRef.current.lastElementChild;
+      if (lastMessage) {
+        // Check if the last message is already visible
+        const rect = lastMessage.getBoundingClientRect();
+        const chatHistoryRect = chatHistoryRef.current.getBoundingClientRect();
+        
+        // Only scroll if the last message is not fully visible
+        if (rect.bottom > chatHistoryRect.bottom || rect.top < chatHistoryRect.top) {
+          // Scroll to show the beginning of the last message with a small offset
+          lastMessage.scrollIntoView({ 
+            behavior: 'smooth', 
+            block: 'start',
+            inline: 'nearest'
+          });
+        }
+      }
+    }
+  }, [chatHistory]);
+
   // Debug: Log active conversation state
   useEffect(() => {
     console.log('Active conversation ID:', activeConversationId);
     console.log('Conversations count:', conversations.length);
-  }, [activeConversationId, conversations]);
+    console.log('Chat history length:', chatHistory.length);
+    
+    // Debug header visibility
+    const header = document.querySelector('.chat-header');
+    if (header) {
+      console.log('Header found:', header);
+      console.log('Header visible:', header.offsetParent !== null);
+      console.log('Header rect:', header.getBoundingClientRect());
+    } else {
+      console.log('Header not found!');
+    }
+  }, [activeConversationId, conversations, chatHistory]);
 
   const fetchConversations = () => {
     fetch(`${API_BASE_URL}/conversations`, {
@@ -209,13 +245,16 @@ function App() {
           <button className="mobile-menu-btn" onClick={toggleSidebar}>
             ☰
           </button>
-          <h2>Gym Chatbot</h2>
+          <h2>MTC Assistant</h2>
         </div>
-        <div className="chat-history">
+        <div className="chat-history" ref={chatHistoryRef}>
           {chatHistory.map((msg, idx) => (
             <div key={idx} className="chat-message">
               <div className="user-message"><b>You:</b> {msg.user_message}</div>
-              <div className="bot-response"><b>Bot:</b> {msg.bot_response}</div>
+              <div className="bot-response">
+                <b>Bot:</b> 
+                <MarkdownRenderer content={msg.bot_response} />
+              </div>
               {msg.citations && msg.citations.length > 0 && (
                 <div className="citations">
                   <b>Citations:</b> {msg.citations.join(', ')}
