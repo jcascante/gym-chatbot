@@ -1,7 +1,7 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends, Body
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import List
+from pydantic import BaseModel, Field
+from typing import List, Optional
 import sqlite3
 import datetime
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +15,15 @@ import asyncio
 import aiosqlite
 import aioboto3
 from contextlib import asynccontextmanager
+from auth import (
+    init_auth_db, create_user, authenticate_user, get_current_user, 
+    get_current_user_optional, create_access_token, create_guest_session,
+    get_user_by_username, get_user_by_id,
+    UserCreate, UserLogin, UserResponse, TokenResponse,
+    hash_password, verify_password, verify_token,
+    create_persistent_guest_session, get_guest_session_by_code
+)
+import secrets
 
 app = FastAPI()
 
@@ -44,12 +53,17 @@ logger = logging.getLogger(__name__)
 async def init_db_async():
     """Initialize database asynchronously"""
     async with aiosqlite.connect(DB_PATH) as conn:
-        # Create conversations table
+        # Initialize authentication tables
+        await init_auth_db()
+        
+        # Create conversations table with user_id
         await conn.execute('''CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
             title TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users (id)
         )''')
         
         # Create chat_history table with conversation_id
@@ -66,9 +80,12 @@ async def init_db_async():
         await conn.commit()
 
 async def migrate_database_async():
-    """Migrate database schema for conversation support"""
+    """Migrate database schema for conversation support and user authentication"""
     try:
         async with aiosqlite.connect(DB_PATH) as conn:
+            # Initialize auth tables first
+            await init_auth_db()
+            
             # Check if conversations table exists
             cursor = await conn.execute("PRAGMA table_info(conversations)")
             conversations_columns = [column[1] async for column in cursor]
@@ -77,16 +94,26 @@ async def migrate_database_async():
                 logger.info("Creating conversations table...")
                 await conn.execute('''CREATE TABLE conversations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
                     title TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users (id)
                 )''')
+                
+                # Create default guest user if it doesn't exist
+                cursor = await conn.execute("SELECT id FROM users WHERE username = 'guest'")
+                guest_user = await cursor.fetchone()
+                if not guest_user:
+                    await conn.execute('''INSERT INTO users (id, username, is_guest, created_at, updated_at) 
+                                        VALUES (?, ?, ?, ?, ?)''', 
+                                     ('guest', 'guest', True, datetime.datetime.now().isoformat(), datetime.datetime.now().isoformat()))
                 
                 # Create default conversation for existing data
                 now = datetime.datetime.now().isoformat()
                 await conn.execute(
-                    'INSERT INTO conversations (title, created_at, updated_at) VALUES (?, ?, ?)',
-                    ('Default Conversation', now, now)
+                    'INSERT INTO conversations (user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)',
+                    ('guest', 'Default Conversation', now, now)
                 )
                 default_conversation_id = await conn.execute('SELECT last_insert_rowid()')
                 default_conversation_id = (await default_conversation_id.fetchone())[0]
@@ -120,27 +147,69 @@ async def migrate_database_async():
                 
                 await conn.commit()
                 logger.info("Migration completed successfully!")
+            else:
+                # Check if user_id column exists in conversations table
+                if 'user_id' not in conversations_columns:
+                    logger.info("Adding user_id column to conversations table...")
+                    # Create new table with user_id
+                    await conn.execute('''CREATE TABLE conversations_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (user_id) REFERENCES users (id)
+                    )''')
+                    
+                    # Create default guest user if it doesn't exist
+                    cursor = await conn.execute("SELECT id FROM users WHERE username = 'guest'")
+                    guest_user = await cursor.fetchone()
+                    if not guest_user:
+                        await conn.execute('''INSERT INTO users (id, username, is_guest, created_at, updated_at) 
+                                            VALUES (?, ?, ?, ?, ?)''', 
+                                         ('guest', 'guest', True, datetime.datetime.now().isoformat(), datetime.datetime.now().isoformat()))
+                    
+                    # Migrate existing conversations to guest user
+                    await conn.execute('''
+                        INSERT INTO conversations_new (user_id, title, created_at, updated_at)
+                        SELECT ?, title, created_at, updated_at FROM conversations
+                    ''', ('guest',))
+                    
+                    # Drop old table and rename new one
+                    await conn.execute('DROP TABLE conversations')
+                    await conn.execute('ALTER TABLE conversations_new RENAME TO conversations')
+                    await conn.commit()
+                    logger.info("Added user_id column to conversations table!")
             
     except Exception as e:
         logger.error(f"Error during migration: {e}")
 
-async def get_chat_history_async(conversation_id: int | None = None, limit: int = 50):
-    """Get chat history for a specific conversation asynchronously"""
+async def get_chat_history_async(user_id: str, conversation_id: int | None = None, limit: int = 50):
+    """Get chat history for a specific user and conversation"""
     async with aiosqlite.connect(DB_PATH) as conn:
         if conversation_id:
+            # Verify the conversation belongs to the user
             cursor = await conn.execute(
-                'SELECT user_message, bot_response, citations, timestamp FROM chat_history WHERE conversation_id = ? ORDER BY id ASC LIMIT ?',
+                'SELECT id FROM conversations WHERE id = ? AND user_id = ?',
+                (conversation_id, user_id)
+            )
+            if not await cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            
+            cursor = await conn.execute(
+                'SELECT user_message, bot_response, citations, timestamp FROM chat_history WHERE conversation_id = ? ORDER BY id DESC LIMIT ?',
                 (conversation_id, limit)
             )
         else:
-            # Get from most recent conversation
+            # Get from most recent conversation for the user
             cursor = await conn.execute('''
                 SELECT ch.user_message, ch.bot_response, ch.citations, ch.timestamp 
                 FROM chat_history ch
                 JOIN conversations c ON ch.conversation_id = c.id
-                ORDER BY c.updated_at DESC, ch.id ASC
+                WHERE c.user_id = ?
+                ORDER BY c.updated_at DESC, ch.id DESC
                 LIMIT ?
-            ''', (limit,))
+            ''', (user_id, limit))
         
         rows = await cursor.fetchall()
         
@@ -161,10 +230,19 @@ async def get_chat_history_async(conversation_id: int | None = None, limit: int 
             })
         return chat_history
 
-async def save_chat_async(conversation_id: int, user_message: str, bot_response: str, citations: List[str]):
-    """Save chat message asynchronously with conversation ID"""
-    timestamp = datetime.datetime.now().isoformat()
+async def save_chat_async(user_id: str, conversation_id: int, user_message: str, bot_response: str, citations: List[str]):
+    """Save chat message for a specific user and conversation"""
+    # Verify the conversation belongs to the user
     async with aiosqlite.connect(DB_PATH) as conn:
+        cursor = await conn.execute(
+            'SELECT id FROM conversations WHERE id = ? AND user_id = ?',
+            (conversation_id, user_id)
+        )
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        timestamp = datetime.datetime.now().isoformat()
+        
         # Save the chat message
         await conn.execute(
             'INSERT INTO chat_history (conversation_id, user_message, bot_response, citations, timestamp) VALUES (?, ?, ?, ?, ?)',
@@ -173,22 +251,22 @@ async def save_chat_async(conversation_id: int, user_message: str, bot_response:
         
         # Update conversation's updated_at timestamp
         await conn.execute(
-            'UPDATE conversations SET updated_at = ? WHERE id = ?',
-            (timestamp, conversation_id)
+            'UPDATE conversations SET updated_at = ? WHERE id = ? AND user_id = ?',
+            (timestamp, conversation_id, user_id)
         )
         
         await conn.commit()
 
-async def create_conversation_async(title: str | None = None) -> int:
-    """Create a new conversation and return its ID"""
+async def create_conversation_async(user_id: str, title: str | None = None) -> int:
+    """Create a new conversation for a specific user and return its ID"""
     if not title:
         title = f"Conversation {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
     
     timestamp = datetime.datetime.now().isoformat()
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(
-            'INSERT INTO conversations (title, created_at, updated_at) VALUES (?, ?, ?)',
-            (title, timestamp, timestamp)
+            'INSERT INTO conversations (user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)',
+            (user_id, title, timestamp, timestamp)
         )
         await conn.commit()
         
@@ -197,17 +275,17 @@ async def create_conversation_async(title: str | None = None) -> int:
         conversation_id = (await cursor.fetchone())[0]
         return conversation_id
 
-async def get_conversations_async() -> List[dict]:
-    """Get list of all conversations with their metadata"""
+async def get_conversations_async(user_id: str) -> List[dict]:
+    """Get all conversations for a specific user"""
     async with aiosqlite.connect(DB_PATH) as conn:
         cursor = await conn.execute('''
-            SELECT c.id, c.title, c.created_at, c.updated_at,
-                   COUNT(ch.id) as message_count
+            SELECT c.id, c.title, c.created_at, c.updated_at, COUNT(ch.id) as message_count, c.user_id
             FROM conversations c
             LEFT JOIN chat_history ch ON c.id = ch.conversation_id
+            WHERE c.user_id = ?
             GROUP BY c.id
             ORDER BY c.updated_at DESC
-        ''')
+        ''', (user_id,))
         
         rows = await cursor.fetchall()
         conversations = []
@@ -217,26 +295,45 @@ async def get_conversations_async() -> List[dict]:
                 'title': row[1],
                 'created_at': row[2],
                 'updated_at': row[3],
-                'message_count': row[4]
+                'message_count': row[4],
+                'user_id': row[5],
             })
         return conversations
 
-async def update_conversation_title_async(conversation_id: int, title: str):
-    """Update the title of a conversation"""
+async def update_conversation_title_async(user_id: str, conversation_id: int, title: str):
+    """Update conversation title for a specific user and update the updated_at timestamp"""
     async with aiosqlite.connect(DB_PATH) as conn:
+        # Ensure the conversation belongs to the user
+        cursor = await conn.execute(
+            'SELECT id FROM conversations WHERE id = ? AND user_id = ?',
+            (conversation_id, user_id)
+        )
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        timestamp = datetime.datetime.now().isoformat()
         await conn.execute(
-            'UPDATE conversations SET title = ? WHERE id = ?',
-            (title, conversation_id)
+            'UPDATE conversations SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?',
+            (title, timestamp, conversation_id, user_id)
         )
         await conn.commit()
 
-async def delete_conversation_async(conversation_id: int):
-    """Delete a conversation and all its messages"""
+async def delete_conversation_async(user_id: str, conversation_id: int):
+    """Delete a conversation for a specific user"""
     async with aiosqlite.connect(DB_PATH) as conn:
-        # Delete all messages in the conversation
+        # Ensure the conversation belongs to the user
+        cursor = await conn.execute(
+            'SELECT id FROM conversations WHERE id = ? AND user_id = ?',
+            (conversation_id, user_id)
+        )
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Delete associated chat history first
         await conn.execute('DELETE FROM chat_history WHERE conversation_id = ?', (conversation_id,))
+        
         # Delete the conversation
-        await conn.execute('DELETE FROM conversations WHERE id = ?', (conversation_id,))
+        await conn.execute('DELETE FROM conversations WHERE id = ? AND user_id = ?', (conversation_id, user_id))
         await conn.commit()
 
 # Initialize database on startup
@@ -331,7 +428,7 @@ async def retrieve_from_knowledge_base_async(query: str):
         return None, []
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1, description="Message cannot be empty")
     conversation_id: int | None = None
 
 class ChatResponse(BaseModel):
@@ -785,90 +882,217 @@ async def generate_response_with_context_async(user_message: str, retrieved_docu
         else:
             return f"[Error: Could not generate response from Bedrock: {e}]", []
 
+@app.post('/auth/register', response_model=TokenResponse)
+async def register_user(user_data: UserCreate):
+    """Register a new user"""
+    # Check if username already exists
+    existing_user = await get_user_by_username(user_data.username)
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    
+    # Create new user
+    user_id = await create_user(user_data.username, user_data.password, user_data.email)
+    
+    # Get the created user
+    user = await get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=500, detail="Failed to create user")
+    
+    # Create access token
+    access_token = create_access_token(data={"sub": user_id})
+    expires_at = (datetime.datetime.utcnow() + datetime.timedelta(days=7)).isoformat()
+    
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        expires_at=expires_at,
+        user=UserResponse(
+            id=user['id'],
+            username=user['username'],
+            email=user['email'],
+            is_guest=user['is_guest'],
+            created_at=user['created_at']
+        )
+    )
+
+@app.post('/auth/login', response_model=TokenResponse)
+async def login_user(user_data: UserLogin):
+    """Login user with username and password"""
+    user = await authenticate_user(user_data.username, user_data.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    
+    # Create access token
+    access_token = create_access_token(data={"sub": user['id']})
+    expires_at = (datetime.datetime.utcnow() + datetime.timedelta(days=7)).isoformat()
+    
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        expires_at=expires_at,
+        user=UserResponse(
+            id=user['id'],
+            username=user['username'],
+            email=user['email'],
+            is_guest=user['is_guest'],
+            created_at=user['created_at']
+        )
+    )
+
+@app.post('/auth/guest', response_model=TokenResponse)
+async def create_guest_session_endpoint():
+    """Create a persistent guest session with session code"""
+    guest_session = await create_persistent_guest_session()
+    
+    # Create access token with guest user ID
+    access_token = create_access_token(data={
+        "sub": guest_session['user_id'], 
+        "username": guest_session['username'], 
+        "is_guest": True
+    })
+    
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        expires_at=guest_session['expires_at'],
+        user=UserResponse(
+            id=guest_session['user_id'],
+            username=guest_session['username'],
+            email=None,
+            is_guest=True,
+            created_at=guest_session['created_at']
+        ),
+        session_code=guest_session['session_code']  # Include session code in response
+    )
+
+@app.post('/auth/guest/join', response_model=TokenResponse)
+async def join_guest_session(session_code: str):
+    """Join an existing guest session using session code"""
+    guest_session = await get_guest_session_by_code(session_code)
+    if not guest_session:
+        raise HTTPException(status_code=404, detail="Invalid or expired session code")
+    
+    # Create access token with guest user ID
+    access_token = create_access_token(data={
+        "sub": guest_session['user_id'], 
+        "username": guest_session['username'], 
+        "is_guest": True
+    })
+    
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        expires_at=guest_session['expires_at'],
+        user=UserResponse(
+            id=guest_session['user_id'],
+            username=guest_session['username'],
+            email=None,
+            is_guest=True,
+            created_at=guest_session['created_at']
+        )
+    )
+
+@app.get('/auth/me', response_model=UserResponse)
+async def get_current_user_info(current_user = Depends(get_current_user)):
+    """Get current user information"""
+    return UserResponse(
+        id=current_user['id'],
+        username=current_user['username'],
+        email=current_user['email'],
+        is_guest=current_user['is_guest'],
+        created_at=current_user['created_at']
+    )
+
 @app.post('/chat', response_model=ChatResponse)
-async def chat_endpoint(chat_request: ChatRequest):
-    user_message = chat_request.message
+async def chat_endpoint(chat_request: ChatRequest, current_user = Depends(get_current_user)):
+    """Send a message and get an AI response"""
+    user_id = current_user['id']
     conversation_id = chat_request.conversation_id
     
     # If no conversation_id provided, create a new conversation
     if not conversation_id:
-        conversation_id = await create_conversation_async()
+        conversation_id = await create_conversation_async(user_id, None)
     
     # Get recent conversation history for language context
-    chat_history = await get_chat_history_async(conversation_id, 10)
+    chat_history = await get_chat_history_async(user_id, conversation_id, 10)
     
     # Step 1: Retrieve relevant documents from knowledge base
-    retrieved_documents, source_uris = await retrieve_from_knowledge_base_async(user_message)
+    retrieved_documents, source_uris = await retrieve_from_knowledge_base_async(chat_request.message)
     
-    # Step 2: Generate response using retrieved documents as context
-    bot_response, citations = await generate_response_with_context_async(user_message, retrieved_documents, source_uris, chat_history)
+    # Step 2: Generate response
+    bot_response, citations = await generate_response_with_context_async(
+        chat_request.message, retrieved_documents, source_uris, chat_history
+    )
     
     # Step 3: Store in database
-    await save_chat_async(conversation_id, user_message, bot_response, citations)
+    await save_chat_async(user_id, conversation_id, chat_request.message, bot_response, citations)
     
     return {"response": bot_response, "citations": citations, "conversation_id": conversation_id}
 
 @app.get('/conversations', response_model=List[ConversationItem])
-async def get_conversations():
-    """Get list of all conversations"""
-    conversations = await get_conversations_async()
+async def get_conversations(current_user = Depends(get_current_user)):
+    """Get list of all conversations for the current user"""
+    user_id = current_user['id']
+    conversations = await get_conversations_async(user_id)
     return conversations
 
 @app.post('/conversations', response_model=CreateConversationResponse)
-async def create_conversation(request: CreateConversationRequest):
+async def create_conversation(request: CreateConversationRequest, current_user = Depends(get_current_user)):
     """Create a new conversation"""
-    conversation_id = await create_conversation_async(request.title)
-    conversations = await get_conversations_async()
+    user_id = current_user['id']
+    conversation_id = await create_conversation_async(user_id, request.title)
+    conversations = await get_conversations_async(user_id)
     new_conversation = next((c for c in conversations if c['id'] == conversation_id), None)
     
-    if new_conversation:
-        return CreateConversationResponse(
-            conversation_id=conversation_id,
-            title=new_conversation['title']
-        )
-    else:
-        raise HTTPException(status_code=500, detail="Failed to create conversation")
+    return CreateConversationResponse(
+        conversation_id=conversation_id,
+        title=new_conversation['title'] if new_conversation else "New Conversation"
+    )
 
 @app.get('/conversations/{conversation_id}/history', response_model=List[HistoryItem])
-async def get_conversation_history(conversation_id: int):
+async def get_conversation_history(conversation_id: int, current_user = Depends(get_current_user)):
     """Get chat history for a specific conversation"""
-    chat_history = await get_chat_history_async(conversation_id, 50)
+    user_id = current_user['id']
+    chat_history = await get_chat_history_async(user_id, conversation_id, 50)
     
     history_items = []
-    for item in chat_history:
+    for msg in chat_history:
         history_items.append(HistoryItem(
-            user_message=item['user_message'],
-            bot_response=item['bot_response'],
-            citations=item['citations'],
-            timestamp=item['timestamp']
+            user_message=msg['user_message'],
+            bot_response=msg['bot_response'],
+            citations=msg['citations'],
+            timestamp=msg['timestamp']
         ))
     
     return history_items
 
 @app.put('/conversations/{conversation_id}', response_model=UpdateConversationResponse)
-async def update_conversation(conversation_id: int, request: UpdateConversationRequest):
+async def update_conversation(conversation_id: int, request: UpdateConversationRequest, current_user = Depends(get_current_user)):
     """Update conversation title"""
-    await update_conversation_title_async(conversation_id, request.title)
+    user_id = current_user['id']
+    await update_conversation_title_async(user_id, conversation_id, request.title)
     return UpdateConversationResponse(message="Conversation updated successfully")
 
 @app.delete('/conversations/{conversation_id}', response_model=DeleteConversationResponse)
-async def delete_conversation(conversation_id: int):
+async def delete_conversation(conversation_id: int, current_user = Depends(get_current_user)):
     """Delete a conversation and all its messages"""
-    await delete_conversation_async(conversation_id)
+    user_id = current_user['id']
+    await delete_conversation_async(user_id, conversation_id)
     return DeleteConversationResponse(message="Conversation deleted successfully")
 
 @app.get('/history', response_model=List[HistoryItem])
-async def get_history():
+async def get_history(current_user = Depends(get_current_user)):
     """Get history from the most recent conversation (for backward compatibility)"""
-    chat_history = await get_chat_history_async(limit=50)
+    user_id = current_user['id']
+    chat_history = await get_chat_history_async(user_id, limit=50)
     
     history_items = []
-    for item in chat_history:
+    for msg in chat_history:
         history_items.append(HistoryItem(
-            user_message=item['user_message'],
-            bot_response=item['bot_response'],
-            citations=item['citations'],
-            timestamp=item['timestamp']
+            user_message=msg['user_message'],
+            bot_response=msg['bot_response'],
+            citations=msg['citations'],
+            timestamp=msg['timestamp']
         ))
     
     return history_items
@@ -894,4 +1118,16 @@ async def clear_database_async():
 @app.get('/health')
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.datetime.now().isoformat()} 
+    return {"status": "healthy", "timestamp": datetime.datetime.now().isoformat()}
+
+@app.post('/auth/change_password')
+async def change_password(username: str = Body(...), new_password: str = Body(...)):
+    """Change a user's password (for admin/testing)"""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        password_hash = hash_password(new_password)
+        await conn.execute(
+            'UPDATE users SET password_hash = ?, updated_at = ? WHERE username = ?',
+            (password_hash, datetime.datetime.utcnow().isoformat(), username)
+        )
+        await conn.commit()
+    return {"message": "Password updated"} 
