@@ -1,10 +1,13 @@
 import React, { useEffect, useState, useRef } from 'react';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 import Sidebar from './components/Sidebar';
 import MarkdownRenderer from './components/MarkdownRenderer';
-import { API_BASE_URL } from './config';
+import LoginForm from './components/LoginForm';
+import UserProfile from './components/UserProfile';
+import { apiGet, apiPost, apiPut, apiDelete } from './utils/api';
 import './App.css';
 
-function App() {
+function ChatApp() {
   const [conversations, setConversations] = useState([]);
   const [activeConversationId, setActiveConversationId] = useState(null);
   const [chatHistory, setChatHistory] = useState([]);
@@ -12,26 +15,24 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const chatHistoryRef = useRef(null);
+  
+  const { user, token, loading: authLoading } = useAuth();
 
-  // Fetch conversations on mount
+  // Fetch conversations when user is authenticated
   useEffect(() => {
-    fetchConversations();
-  }, []);
+    if (user && token) {
+      fetchConversations();
+    }
+  }, [user, token]);
 
   // Fetch chat history when active conversation changes
   useEffect(() => {
-    if (activeConversationId) {
-      fetch(`${API_BASE_URL}/conversations/${activeConversationId}/history`, {
-        headers: {
-          'ngrok-skip-browser-warning': 'true'
-        }
-      })
-        .then(res => res.json())
-        .then(setChatHistory);
+    if (activeConversationId && token) {
+      fetchChatHistory(activeConversationId);
     } else {
       setChatHistory([]);
     }
-  }, [activeConversationId]);
+  }, [activeConversationId, token]);
 
   // Auto-scroll to show new messages when chat history changes
   useEffect(() => {
@@ -73,31 +74,30 @@ function App() {
     }
   }, [activeConversationId, conversations, chatHistory]);
 
-  const fetchConversations = () => {
-    fetch(`${API_BASE_URL}/conversations`, {
-      headers: {
-        'ngrok-skip-browser-warning': 'true'
+  const fetchConversations = async () => {
+    try {
+      const data = await apiGet('/conversations', token);
+      setConversations(data);
+      if (!activeConversationId && data.length > 0) {
+        setActiveConversationId(data[0].id);
+      } else if (data.length === 0) {
+        // Auto-create a conversation if none exists
+        handleCreateConversation();
       }
-    })
-      .then(res => {
-        if (!res.ok) {
-          throw new Error(`HTTP error! status: ${res.status}`);
-        }
-        return res.json();
-      })
-      .then(data => {
-        setConversations(data);
-        if (!activeConversationId && data.length > 0) {
-          setActiveConversationId(data[0].id);
-        } else if (data.length === 0) {
-          // Auto-create a conversation if none exists
-          handleCreateConversation();
-        }
-      })
-      .catch(error => {
-        console.error('Error fetching conversations:', error);
-        setConversations([]);
-      });
+    } catch (error) {
+      console.error('Error fetching conversations:', error);
+      setConversations([]);
+    }
+  };
+
+  const fetchChatHistory = async (conversationId) => {
+    try {
+      const data = await apiGet(`/conversations/${conversationId}/history`, token);
+      setChatHistory(data);
+    } catch (error) {
+      console.error('Error fetching chat history:', error);
+      setChatHistory([]);
+    }
   };
 
   const handleSelectConversation = (id) => {
@@ -106,56 +106,37 @@ function App() {
     setSidebarOpen(false);
   };
 
-  const handleCreateConversation = () => {
-    fetch(`${API_BASE_URL}/conversations`, {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'ngrok-skip-browser-warning': 'true'
-      },
-      body: JSON.stringify({ title: null })
-    })
-      .then(res => {
-        if (!res.ok) {
-          throw new Error(`HTTP error! status: ${res.status}`);
-        }
-        return res.json();
-      })
-      .then(data => {
-        fetchConversations();
-        setActiveConversationId(data.conversation_id);
-        // Close sidebar on mobile after creating conversation
-        setSidebarOpen(false);
-      })
-      .catch(error => {
-        console.error('Error creating conversation:', error);
-      });
+  const handleCreateConversation = async () => {
+    try {
+      const data = await apiPost('/conversations', { title: null }, token);
+      fetchConversations();
+      setActiveConversationId(data.conversation_id);
+      // Close sidebar on mobile after creating conversation
+      setSidebarOpen(false);
+    } catch (error) {
+      console.error('Error creating conversation:', error);
+    }
   };
 
-  const handleRenameConversation = (id, title) => {
-    fetch(`${API_BASE_URL}/conversations/${id}`, {
-      method: 'PUT',
-      headers: { 
-        'Content-Type': 'application/json',
-        'ngrok-skip-browser-warning': 'true'
-      },
-      body: JSON.stringify({ title })
-    }).then(() => fetchConversations());
+  const handleRenameConversation = async (id, title) => {
+    try {
+      await apiPut(`/conversations/${id}`, { title }, token);
+      fetchConversations();
+    } catch (error) {
+      console.error('Error renaming conversation:', error);
+    }
   };
 
-  const handleDeleteConversation = (id) => {
-    fetch(`${API_BASE_URL}/conversations/${id}`, { 
-      method: 'DELETE',
-      headers: {
-        'ngrok-skip-browser-warning': 'true'
+  const handleDeleteConversation = async (id) => {
+    try {
+      await apiDelete(`/conversations/${id}`, token);
+      fetchConversations();
+      if (id === activeConversationId) {
+        setActiveConversationId(null);
       }
-    })
-      .then(() => {
-        fetchConversations();
-        if (id === activeConversationId) {
-          setActiveConversationId(null);
-        }
-      });
+    } catch (error) {
+      console.error('Error deleting conversation:', error);
+    }
   };
 
   const handleSend = async (e) => {
@@ -165,39 +146,16 @@ function App() {
     setLoading(true);
     
     try {
-      const chatUrl = `${API_BASE_URL}/chat`;
+      await apiPost('/chat', { 
+        message: input, 
+        conversation_id: activeConversationId 
+      }, token);
       
-      const res = await fetch(chatUrl, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'ngrok-skip-browser-warning': 'true'
-        },
-        body: JSON.stringify({ message: input, conversation_id: activeConversationId })
-      });
-      
-      if (!res.ok) {
-        throw new Error(`HTTP error! status: ${res.status}`);
-      }
-      
-      // Try to parse JSON directly
-      const data = await res.json();
       setInput('');
       setLoading(false);
       
       // Refresh chat history immediately
-      const historyRes = await fetch(`${API_BASE_URL}/conversations/${activeConversationId}/history`, {
-        headers: {
-          'ngrok-skip-browser-warning': 'true'
-        }
-      });
-      
-      if (historyRes.ok) {
-        const historyData = await historyRes.json();
-        setChatHistory(historyData);
-      } else {
-        console.error('Failed to get history:', historyRes.status);
-      }
+      await fetchChatHistory(activeConversationId);
       
       // Optionally update conversations (for updated_at)
       fetchConversations();
@@ -222,6 +180,26 @@ function App() {
     }
   };
 
+  // Show loading screen while checking authentication
+  if (authLoading) {
+    return (
+      <div className="loading-container">
+        <div className="loading-spinner"></div>
+        <p>Loading...</p>
+      </div>
+    );
+  }
+
+  // Show authentication form if not authenticated
+  if (!user) {
+    return (
+      <div className="auth-wrapper">
+        <LoginForm />
+      </div>
+    );
+  }
+
+  // Show chat interface if authenticated
   return (
     <div className="app-container">
       <Sidebar
@@ -246,6 +224,7 @@ function App() {
             ☰
           </button>
           <h2>MTC Assistant</h2>
+          <UserProfile />
         </div>
         <div className="chat-history" ref={chatHistoryRef}>
           {chatHistory.map((msg, idx) => (
@@ -286,6 +265,14 @@ function App() {
         </form>
       </main>
     </div>
+  );
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <ChatApp />
+    </AuthProvider>
   );
 }
 

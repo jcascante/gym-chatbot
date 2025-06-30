@@ -22,4 +22,8 @@ MAX_TOKENS_TO_SAMPLE = int(os.getenv('MAX_TOKENS_TO_SAMPLE', '500'))
 TEMPERATURE = float(os.getenv('TEMPERATURE', '0.7'))
 
 # Database Configuration
-DB_PATH = os.getenv('DB_PATH', 'chat_history.db') 
+DB_PATH = os.getenv('DB_PATH', 'chat_history.db')
+
+# JWT Configuration
+JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY', 'your-secret-key-change-in-production')
+JWT_ALGORITHM = os.getenv('JWT_ALGORITHM', 'HS256') 
